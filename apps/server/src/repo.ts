@@ -448,6 +448,17 @@ export class SyncRepo {
     };
   }
 
+  /** Counts ops (and distinct opIds) and records whose ids start with `prefix`. */
+  countByPrefix(prefix: string): { ops: number; distinctOpIds: number; records: number } {
+    const ops = this.db
+      .prepare('SELECT COUNT(*) AS c, COUNT(DISTINCT op_id) AS d FROM ops WHERE substr(op_id, 1, length(?)) = ?')
+      .get(prefix, prefix) as { c: number; d: number };
+    const records = this.db
+      .prepare('SELECT COUNT(*) AS c FROM records WHERE substr(id, 1, length(?)) = ?')
+      .get(prefix, prefix) as { c: number };
+    return { ops: ops.c, distinctOpIds: ops.d, records: records.c };
+  }
+
   seedDemoData(): void {
     const tx = this.db.transaction(() => {
       // Clear tables

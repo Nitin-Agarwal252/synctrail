@@ -1,0 +1,22 @@
+$ curl http://localhost:3101/  (npm run start:prod, PORT=3101)
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="theme-color" content="#0f172a" />
+    <meta name="description" content="Offline-first field-survey platform with no silent data loss" />
+    <title>SyncTrail · Survey</ti
+$ curl http://localhost:3101/api/nope
+{"error":"Not found"}
+[404 application/json; charset=utf-8]
+$ curl http://localhost:3101/api/health
+{"ok":true,"seq":12,"epoch":"87e5d956-27ab-4399-8d07-f4fb2736406f"}
+[200]
+$ grep -c "@synctrail/shared" apps/server/dist/index.js  (0 = shared is bundled)
+0
+$ SERVE_STATIC=1 WEB_DIST=/nonexistent node apps/server/dist/index.js
+Error: SERVE_STATIC=1 but no web build at /nonexistent. Run `npm run build` or set WEB_DIST.
+    at resolveWebDist (file:///home/ubuntu/repos/synctrail/apps/server/dist/index.js:973:11)
+[exit 1]

@@ -7,6 +7,7 @@ import { classifyOps } from './opValidation';
 import type { ApplyResult, Op } from '@synctrail/shared';
 
 const EPOCH_RE = /^[A-Za-z0-9-]{1,64}$/;
+const PREFIX_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 const FieldValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 
@@ -147,9 +148,11 @@ export function registerRoutes(
   });
 
   // 7. Stats endpoint (GET /api/stats)
-  app.get('/api/stats', async (_request, reply) => {
-    const stats = repo.getStats();
-    return reply.code(200).send(stats);
+  app.get('/api/stats', async (request, reply) => {
+    const { prefix } = request.query as { prefix?: string };
+    if (prefix === undefined) return reply.code(200).send(repo.getStats());
+    if (!PREFIX_RE.test(prefix)) return reply.code(400).send({ error: 'Invalid prefix parameter' });
+    return reply.code(200).send({ ...repo.getStats(), prefix: { value: prefix, ...repo.countByPrefix(prefix) } });
   });
 
   // 8. Dev reset endpoint (POST /api/dev/reset)

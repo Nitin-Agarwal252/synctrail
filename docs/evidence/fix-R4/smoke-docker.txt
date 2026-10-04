@@ -1,0 +1,7 @@
+
+Running 1 test using 1 worker
+
+  ✓  1 [chromium] › smoke/smoke.spec.ts:3:1 › deployed app: health, app shell, records, live WebSocket, JSON 404 (439ms)
+
+  1 passed (937ms)
+SMOKE_DOCKER_EXIT 0

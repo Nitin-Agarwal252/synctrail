@@ -1,0 +1,17 @@
+$ docker build -t synctrail:r4 .   -> BUILD_EXIT 0 (base image node:22-bookworm-slim)
+$ docker run -d -p 8080:8080 -v synctrail-r4-data:/data synctrail:r4
+$ curl http://localhost:8080/
+    <title>SyncTrail · Survey</title>
+[200 text/html; charset=UTF-8]
+$ curl http://localhost:8080/api/nope
+{"error":"Not found"}
+[404 application/json; charset=utf-8]
+$ curl http://localhost:8080/api/health
+{"ok":true,"seq":12,"epoch":"5bb9da26-1f74-4932-8d3a-0f4cd8c7c02e"}
+[200]
+$ curl -X POST http://localhost:8080/api/dev/reset   (NODE_ENV=production, no ALLOW_RESET)
+{"error":"Reset disabled in production"}
+[403]
+$ docker restart synctrail-r4 && curl /api/health   (volume keeps the DB: same epoch)
+{"ok":true,"seq":12,"epoch":"5bb9da26-1f74-4932-8d3a-0f4cd8c7c02e"}
+[200]

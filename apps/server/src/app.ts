@@ -23,9 +23,38 @@ export interface AppContext {
   broadcaster: WsBroadcaster;
 }
 
+/** Fastify's default, made explicit: larger push bodies get 413. */
+export const BODY_LIMIT_BYTES = 1024 * 1024;
+
+/**
+ * SERVE_STATIC=1 serves the Vite build. From apps/server/dist (or src) the build is ../../web/dist;
+ * WEB_DIST overrides it. A missing build is a startup error, not a silent API-only server.
+ */
+function resolveWebDist(): string | null {
+  if (process.env.SERVE_STATIC !== '1') return null;
+  const here = fileURLToPath(new URL('.', import.meta.url));
+  const root = resolve(process.env.WEB_DIST ?? join(here, '../../web/dist'));
+  if (!existsSync(join(root, 'index.html'))) {
+    throw new Error(`SERVE_STATIC=1 but no web build at ${root}. Run \`npm run build\` or set WEB_DIST.`);
+  }
+  return root;
+}
+
+async function registerStatic(app: FastifyInstance, root: string): Promise<void> {
+  await app.register(staticPlugin, { root, prefix: '/', wildcard: false });
+  app.setNotFoundHandler((request, reply) => {
+    if (request.url.startsWith('/api') || request.url.startsWith('/ws')) {
+      return reply.code(404).send({ error: 'Not found' });
+    }
+    return reply.sendFile('index.html', root);
+  });
+}
+
 export async function buildApp(opts: AppOptions = {}): Promise<FastifyInstance> {
+  const webDist = resolveWebDist();
   const app = Fastify({
     logger: opts.logger ?? false,
+    bodyLimit: BODY_LIMIT_BYTES,
     // A `__proto__` key must reject only the op that carries it, not the whole
     // batch. opValidation.ts rejects it per op; JSON.parse never pollutes prototypes.
     onProtoPoisoning: 'ignore',
@@ -49,31 +78,7 @@ export async function buildApp(opts: AppOptions = {}): Promise<FastifyInstance> 
 
   registerRoutes(app, repo, broadcaster);
 
-  // Production single-process mode: serve the Vite web build.
-  // Enabled only when SERVE_STATIC=1 and apps/web/dist exists.
-  if (process.env.SERVE_STATIC === '1') {
-    // __dirname equivalent in ESM
-    const __dirname = fileURLToPath(new URL('.', import.meta.url));
-    // When built, index.js is in dist/ and web dist is at ../../apps/web/dist relative to source
-    const webDist = resolve(join(__dirname, '../../../web/dist'));
-    const webDistAlt = resolve(join(__dirname, '../../apps/web/dist'));
-    const staticRoot = existsSync(webDist) ? webDist : existsSync(webDistAlt) ? webDistAlt : null;
-
-    if (staticRoot) {
-      await app.register(staticPlugin, {
-        root: staticRoot,
-        prefix: '/',
-        wildcard: false,
-      });
-      // SPA fallback — all unmatched non-/api routes serve index.html
-      app.setNotFoundHandler((_request, reply) => {
-        if (_request.url.startsWith('/api') || _request.url.startsWith('/ws')) {
-          return reply.code(404).send({ error: 'Not found' });
-        }
-        return reply.sendFile('index.html', staticRoot);
-      });
-    }
-  }
+  if (webDist) await registerStatic(app, webDist);
 
   // Decorate app for testing and inspection
   app.decorate('db', db);

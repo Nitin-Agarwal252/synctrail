@@ -102,61 +102,105 @@ test.describe('Phase 4: Sync Engine & Connectivity', () => {
     }
   });
 
-  test('Scenario 6: Interrupted sync with large backlog', async ({ browser }) => {
+  test('Scenario 6: Interrupted sync — 120-op backlog, network cut after the first push succeeds, restored, each opId on the server exactly once', async ({
+    browser,
+    request,
+  }) => {
     const context = await browser.newContext({ baseURL: 'http://localhost:3000' });
     const page = await context.newPage();
+    const prefix = `s6_${Date.now()}_`;
+    const backlog = 120;
+
+    const serverCounts = async () =>
+      (await (await request.get(`http://localhost:3001/api/stats?prefix=${prefix}`)).json()).prefix;
+    const localCounts = () =>
+      page.evaluate(
+        () =>
+          new Promise<{ outbox: number; deadOps: number }>((resolve, reject) => {
+            const req = indexedDB.open('synctrail_db');
+            req.onerror = () => reject(req.error);
+            req.onsuccess = () => {
+              const tx = req.result.transaction(['outbox', 'deadOps'], 'readonly');
+              const outbox = tx.objectStore('outbox').count();
+              const deadOps = tx.objectStore('deadOps').count();
+              tx.oncomplete = () => resolve({ outbox: outbox.result, deadOps: deadOps.result });
+              tx.onerror = () => reject(tx.error);
+            };
+          }),
+      );
 
     try {
       await page.goto('http://localhost:3000/');
       await page.waitForLoadState('networkidle');
 
-      // Go offline to accumulate backlog
       await context.setOffline(true);
       await page.evaluate(() => window.dispatchEvent(new Event('offline')));
 
-      // Queue 60 ops (exceeds single batch size of 50) directly into Dexie outbox
-      await page.evaluate(async () => {
-        return new Promise<void>((resolve, reject) => {
-          // @ts-expect-error accessing indexedDB directly in browser context
-          const req = indexedDB.open('synctrail_db');
-          req.onerror = () => reject(req.error);
-          req.onsuccess = () => {
-            const idb = req.result;
-            const tx = idb.transaction('outbox', 'readwrite');
-            tx.oncomplete = () => resolve();
-            tx.onerror = () => reject(tx.error);
-            const store = tx.objectStore('outbox');
+      // Queue 120 valid creates (3 batches of 50/50/20) directly into the Dexie outbox.
+      await page.evaluate(
+        ({ prefix, backlog }) =>
+          new Promise<void>((resolve, reject) => {
+            const req = indexedDB.open('synctrail_db');
+            req.onerror = () => reject(req.error);
+            req.onsuccess = () => {
+              const tx = req.result.transaction('outbox', 'readwrite');
+              tx.oncomplete = () => resolve();
+              tx.onerror = () => reject(tx.error);
+              const store = tx.objectStore('outbox');
+              for (let i = 0; i < backlog; i++) {
+                const wall = String(1_790_000_000_000 + i).padStart(15, '0');
+                store.add({
+                  opId: `${prefix}op_${i}`,
+                  deviceId: 'dev_e2e',
+                  userId: 'Meera',
+                  recordId: `${prefix}rec_${i}`,
+                  type: 'create',
+                  fields: { name: `Backlog Family ${i}` },
+                  baseHlc: null,
+                  hlc: `${wall}:00000:dev_e2e`,
+                });
+              }
+            };
+          }),
+        { prefix, backlog },
+      );
 
-            for (let i = 0; i < 60; i++) {
-              store.add({
-                opId: `bulk_e2e_op_${Date.now()}_${i}`,
-                deviceId: 'dev_e2e',
-                userId: 'Meera',
-                recordId: `bulk_e2e_rec_${Date.now()}_${i}`,
-                type: 'create',
-                fields: { name: `Backlog Family ${i}` },
-                baseHlc: null,
-                hlc: `2026-10-04T12:00:00.000Z-${String(i).padStart(4, '0')}-dev_e2e`,
-              });
-            }
-          };
-        });
-      });
-
-      // Reload to reflect queued ops in UI
       await page.reload();
       await page.evaluate(() => window.dispatchEvent(new Event('offline')));
-
-      // Wait for outbox counter to report waiting ops
       await expect(page.getByTestId('outbox-counter')).toBeVisible({ timeout: 5000 });
+      expect((await localCounts()).outbox).toBe(backlog);
 
-      // Reconnect and allow sync to drain the 60-op backlog across batches
+      // The first push reaches the server and its response is delivered; then the network is cut,
+      // so every later push in this sync aborts.
+      let pushes = 0;
+      let markCut: () => void = () => {};
+      const cut = new Promise<void>((resolve) => (markCut = resolve));
+      await page.route('**/api/sync/push', async (route) => {
+        pushes++;
+        if (pushes > 1) return route.abort('internetdisconnected');
+        await route.fulfill({ response: await route.fetch() });
+        await context.setOffline(true);
+        markCut();
+      });
+
+      await context.setOffline(false);
+      await page.evaluate(() => window.dispatchEvent(new Event('online')));
+      await cut;
+      await page.evaluate(() => window.dispatchEvent(new Event('offline')));
+
+      await expect.poll(async () => (await localCounts()).outbox, { timeout: 10000 }).toBe(backlog - 50);
+      expect(await serverCounts()).toMatchObject({ ops: 50, distinctOpIds: 50, records: 50 });
+      await expect(page.getByTestId('outbox-counter')).toBeVisible();
+
+      // Restore the network: the rest drains.
+      await page.unroute('**/api/sync/push');
       await context.setOffline(false);
       await page.evaluate(() => window.dispatchEvent(new Event('online')));
 
-      // All ops should drain cleanly and outbox should reach 0
-      await expect(page.getByTestId('connection-pill')).toContainText('Synced', { timeout: 15000 });
-      await expect(page.getByTestId('outbox-counter')).not.toBeVisible({ timeout: 15000 });
+      await expect(page.getByTestId('connection-pill')).toContainText('Synced', { timeout: 20000 });
+      await expect(page.getByTestId('outbox-counter')).not.toBeVisible({ timeout: 20000 });
+      expect(await localCounts()).toEqual({ outbox: 0, deadOps: 0 });
+      expect(await serverCounts()).toEqual({ value: prefix, ops: backlog, distinctOpIds: backlog, records: backlog });
     } finally {
       await context.close();
     }

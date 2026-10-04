@@ -1,3 +1,4 @@
+import Dexie, { type ObservabilitySet } from 'dexie';
 import {
   type Op,
   type ApplyResult,
@@ -261,6 +262,8 @@ export class SyncEngine {
   private outcomes: PushOutcomeCounts = { accepted: 0, conflicted: 0, deadLettered: 0 };
   private wsUnsubscribe: (() => void) | null = null;
   private connectivityUnsubscribe: (() => void) | null = null;
+  private outboxUnsubscribe: (() => void) | null = null;
+  private resyncRequested = false;
 
   constructor(options: SyncEngineOptions = {}) {
     this.db = options.db ?? defaultDb;
@@ -329,6 +332,8 @@ export class SyncEngine {
         });
       }
 
+      this.outboxUnsubscribe = this.watchOutbox();
+
       // Initial sync
       await this.triggerSync();
 
@@ -361,6 +366,22 @@ export class SyncEngine {
       this.connectivityUnsubscribe();
       this.connectivityUnsubscribe = null;
     }
+    if (this.outboxUnsubscribe) {
+      this.outboxUnsubscribe();
+      this.outboxUnsubscribe = null;
+    }
+  }
+
+  /** Other tabs write to the shared outbox but do not sync; the lock holder pushes their ops. */
+  private watchOutbox(): () => void {
+    const prefix = `idb://${this.db.name}/outbox/`;
+    const onMutated = (parts: ObservabilitySet) => {
+      if (!Object.keys(parts).some((key) => key.startsWith(prefix))) return;
+      if (this.isSyncing) this.resyncRequested = true;
+      else void this.triggerSync();
+    };
+    Dexie.on('storagemutated', onMutated);
+    return () => Dexie.on.storagemutated.unsubscribe(onMutated);
   }
 
   private clearRetry() {
@@ -397,6 +418,8 @@ export class SyncEngine {
   }
 
   async triggerSync(): Promise<void> {
+    // While the multi-tab loop runs, only the tab holding the lock syncs.
+    if (this.isRunningLoop && !this.tabLock.isLeader()) return;
     if (!this.connectivity.isOnline()) {
       this.setState('offline');
       return;
@@ -426,6 +449,10 @@ export class SyncEngine {
       }
     } finally {
       this.isSyncing = false;
+      if (this.resyncRequested) {
+        this.resyncRequested = false;
+        void this.triggerSync();
+      }
     }
   }
 
