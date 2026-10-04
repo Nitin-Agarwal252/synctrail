@@ -1,0 +1,14 @@
+# Render Blueprint: one free Docker web service (HTTPS + wss on *.onrender.com).
+# Free instances have no persistent disk, so every restart reseeds the 12 demo households
+# with a new reset epoch (see docs/DEPLOY.md, "Ephemeral demo").
+services:
+  - type: web
+    name: synctrail
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: "8080"

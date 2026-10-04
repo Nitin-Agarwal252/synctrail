@@ -23,6 +23,14 @@ docker run -p 8080:8080 -v synctrail-data:/data synctrail
 Node: the server build bundles `@synctrail/shared` (`esbuild --bundle`, only npm dependencies are
 external), so `apps/server/dist/index.js` never loads `.ts` files at runtime. Node 22 is what is tested.
 
+### Render (free)
+
+`render.yaml` is a Render Blueprint for one free Docker web service. In Render: **New → Blueprint**,
+pick this GitHub repo, **Apply**. Render builds the `Dockerfile` and serves it at
+`https://<service>.onrender.com` (HTTPS and wss included). Free-tier limits: the service sleeps after
+15 minutes idle (the first request then takes about a minute) and has no persistent disk, so data is
+reseeded on every restart (the ephemeral demo option below).
+
 ## Environment
 
 | Variable | Default | Meaning |
