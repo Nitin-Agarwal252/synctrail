@@ -1,4 +1,4 @@
-import { DatabaseInstance } from './db';
+import { DatabaseInstance, newEpoch } from './db';
 import {
   applyOp,
   previewOps,
@@ -19,6 +19,8 @@ export interface PullResult {
   records: (RecordState & { seq: number })[];
   conflicts: (Conflict & { seq: number })[];
   seq: number;
+  epoch: string;
+  reset: boolean;
 }
 
 export interface StatsResult {
@@ -36,6 +38,22 @@ export class SyncRepo {
       | { value: string }
       | undefined;
     return row ? Number(row.value) : 0;
+  }
+
+  getEpoch(): string {
+    const row = this.db.prepare('SELECT value FROM meta WHERE key = ?').get('epoch') as
+      | { value: string }
+      | undefined;
+    return row ? row.value : '';
+  }
+
+  /** A client on another epoch gets full state (since=0) with reset:true. */
+  pullForClient(sinceSeq: number, clientEpoch?: string): PullResult {
+    const epoch = this.getEpoch();
+    if (clientEpoch !== undefined && clientEpoch !== epoch) {
+      return { ...this.pull(0), reset: true };
+    }
+    return this.pull(sinceSeq);
   }
 
   private incrementSeq(): number {
@@ -290,6 +308,8 @@ export class SyncRepo {
       records,
       conflicts,
       seq: currentSeq,
+      epoch: this.getEpoch(),
+      reset: false,
     };
   }
 
@@ -436,8 +456,9 @@ export class SyncRepo {
         DELETE FROM ops;
         DELETE FROM conflicts;
         DELETE FROM audit;
-        UPDATE meta SET value = '0' WHERE key = 'seq';
       `);
+      // seq stays monotonic across a reset; the new epoch tells clients to drop their state.
+      this.db.prepare('UPDATE meta SET value = ? WHERE key = ?').run(newEpoch(), 'epoch');
 
       const households = [
         { id: 'h_01', name: 'Rao family', phone: '98300 11122', address: 'Ward 4, House 12', status: 'follow-up', notes: 'Child under 5 needs vaccination check', author: 'Meera' },

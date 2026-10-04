@@ -10,6 +10,7 @@ import { Toast } from './components/Toast';
 import { ConflictInbox } from './components/ConflictInbox';
 import { SyncPreviewModal } from './components/SyncPreviewModal';
 import { DeadLetterBanner } from './components/DeadLetterBanner';
+import { ServerResetNotice } from './components/ServerResetNotice';
 import { DashboardPage } from './pages/DashboardPage';
 import { ChaosPage } from './pages/ChaosPage';
 
@@ -35,6 +36,8 @@ export function App() {
     syncState,
     retryCountdown,
     lastSyncedAt,
+    serverResetUnsynced,
+    dismissServerReset,
     switchUser,
     triggerSync,
     resolveConflict,
@@ -147,6 +150,13 @@ export function App() {
 
       {/* Offline Banner */}
       <OfflineBanner />
+
+      <ServerResetNotice
+        unsynced={serverResetUnsynced}
+        onDismiss={() => {
+          dismissServerReset().catch(() => {});
+        }}
+      />
 
       <DeadLetterBanner
         deadOps={deadOps}

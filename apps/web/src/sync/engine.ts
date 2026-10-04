@@ -1,4 +1,11 @@
-import { type Op, type ApplyResult, type Conflict, type RecordState, type FieldValue } from '@synctrail/shared';
+import {
+  type Op,
+  type ApplyResult,
+  type Conflict,
+  type RecordState,
+  type FieldValue,
+  hlc,
+} from '@synctrail/shared';
 import { SyncTrailDb, db as defaultDb, type OutboxOp } from '../db';
 import { ConnectivityManager, connectivity as defaultConnectivity } from './connectivity';
 import { TabLock, tabLock as defaultTabLock } from './tabLock';
@@ -9,6 +16,21 @@ export interface PullResponse {
   records: (RecordState & { seq: number })[];
   conflicts: (Conflict & { seq?: number })[];
   seq: number;
+  /** Server database identity; changes when the server is reset or recreated. */
+  epoch?: string;
+  /** True when the server answered with full state because our epoch was stale. */
+  reset?: boolean;
+}
+
+/** Meta key holding the count of unsynced changes at the last server reset. */
+export const SERVER_RESET_NOTICE_KEY = 'serverResetNotice';
+
+function maxVersion(records: RecordState[]): string | null {
+  let best: string | null = null;
+  for (const r of records) {
+    if (r.version && (best === null || hlc.compare(r.version, best) > 0)) best = r.version;
+  }
+  return best;
 }
 
 export class SyncPushError extends Error {
@@ -60,7 +82,7 @@ export interface SyncTransport {
     userId: string,
     ops: Op[]
   ): Promise<{ results: ApplyResult[]; seq: number }>;
-  pull(since: number): Promise<PullResponse>;
+  pull(since: number, epoch?: string): Promise<PullResponse>;
   preview?(ops: Op[]): Promise<{ results: ApplyResult[] }>;
   resolveConflict?(
     conflictId: string,
@@ -102,8 +124,9 @@ export class HttpSyncTransport implements SyncTransport {
     return await res.json();
   }
 
-  async pull(since: number): Promise<PullResponse> {
-    const res = await fetch(`${this.baseUrl}/api/sync/pull?since=${since}`, {
+  async pull(since: number, epoch?: string): Promise<PullResponse> {
+    const epochParam = epoch ? `&epoch=${encodeURIComponent(epoch)}` : '';
+    const res = await fetch(`${this.baseUrl}/api/sync/pull?since=${since}${epochParam}`, {
       method: 'GET',
       headers: { 'Cache-Control': 'no-cache' },
     });
@@ -213,6 +236,8 @@ export interface SyncEngineOptions {
   connectivity?: ConnectivityManager;
   tabLock?: TabLock;
   batchSize?: number;
+  /** Safety pull interval while online and tab leader. */
+  safetyPullMs?: number;
 }
 
 export class SyncEngine {
@@ -221,6 +246,8 @@ export class SyncEngine {
   private connectivity: ConnectivityManager;
   private tabLock: TabLock;
   private batchSize: number;
+  private safetyPullMs: number;
+  private pullChain: Promise<unknown> = Promise.resolve();
 
   private state: SyncState = 'synced';
   private retryCountdown = 0;
@@ -241,6 +268,7 @@ export class SyncEngine {
     this.connectivity = options.connectivity ?? defaultConnectivity;
     this.tabLock = options.tabLock ?? defaultTabLock;
     this.batchSize = options.batchSize ?? 50;
+    this.safetyPullMs = options.safetyPullMs ?? 30_000;
 
     this.state = this.connectivity.isOnline() ? 'synced' : 'offline';
   }
@@ -297,18 +325,23 @@ export class SyncEngine {
       // Connect WebSocket for push hints
       if (this.transport.connectWs) {
         this.wsUnsubscribe = this.transport.connectWs(() => {
-          this.pull();
+          void this.safePull();
         });
       }
 
       // Initial sync
       await this.triggerSync();
 
+      const safety = setInterval(() => {
+        if (this.connectivity.isOnline()) void this.safePull();
+      }, this.safetyPullMs);
+
       // Keep running until leader is released
       await new Promise<void>((resolve) => {
         const checkActive = setInterval(() => {
           if (!this.isRunningLoop) {
             clearInterval(checkActive);
+            clearInterval(safety);
             resolve();
           }
         }, 1000);
@@ -562,36 +595,83 @@ export class SyncEngine {
     await this.db.deadOps.where('opId').equals(opId).delete();
   }
 
-  /**
-   * Pulls remote changes incrementally since cursor.
-   */
-  async pull(): Promise<PullResponse> {
-    const cursorStr = await this.db.getMeta('cursor');
-    const cursor = cursorStr ? Number(cursorStr) : 0;
+  /** Pull for WebSocket hints and the safety timer: a failure waits for the next trigger. */
+  async safePull(): Promise<void> {
+    try {
+      await this.pull();
+    } catch {
+      // The next hint, safety pull or triggerSync retries.
+    }
+  }
 
-    const res = await this.transport.pull(cursor);
+  /** Pulls remote changes since the cursor. All pulls run one at a time, in call order. */
+  pull(): Promise<PullResponse> {
+    const run = this.pullChain.then(() => this.pullOnce());
+    this.pullChain = run.catch(() => undefined);
+    return run;
+  }
 
-    await this.db.transaction(
-      'rw',
-      [this.db.snapshot, this.db.conflicts, this.db.meta],
-      async () => {
-        // Upsert snapshot records
-        for (const record of res.records) {
-          await this.db.snapshot.put(record);
-        }
-
-        // Upsert conflicts
-        for (const conflict of res.conflicts) {
-          await this.db.conflicts.put(conflict);
-        }
-
-        // Update cursor and lastSyncedAt
-        await this.db.setMeta('cursor', String(res.seq));
-        await this.db.setMeta('lastSyncedAt', new Date().toISOString());
-      }
-    );
-
+  private async pullOnce(): Promise<PullResponse> {
+    const { deviceId } = await this.db.initMeta();
+    const cursor = Number((await this.db.getMeta('cursor')) ?? 0);
+    const epoch = (await this.db.getMeta('epoch')) ?? undefined;
+    let res = await this.transport.pull(cursor, epoch);
+    if (!res.reset && epoch && res.epoch && res.epoch !== epoch) {
+      res = { ...(await this.transport.pull(0, res.epoch)), reset: true };
+    }
+    if (res.reset) {
+      await this.applyResetPull(res, deviceId);
+    } else {
+      await this.applyIncrementalPull(res, deviceId);
+    }
     return res;
+  }
+
+  /** Server reset: drop snapshot, conflicts and cursor; keep the outbox (R1 rules apply). */
+  private async applyResetPull(res: PullResponse, deviceId: string): Promise<void> {
+    const tables = [this.db.snapshot, this.db.conflicts, this.db.meta, this.db.outbox, this.db.deadOps];
+    await this.db.transaction('rw', tables, async () => {
+      await this.db.snapshot.clear();
+      await this.db.conflicts.clear();
+      await this.db.snapshot.bulkPut(res.records);
+      await this.db.conflicts.bulkPut(res.conflicts);
+      const unsynced = (await this.db.outbox.count()) + (await this.db.deadOps.count());
+      await this.db.setMeta(SERVER_RESET_NOTICE_KEY, String(unsynced));
+      await this.db.setMeta('cursor', String(res.seq));
+      await this.finishPull(res, deviceId);
+    });
+  }
+
+  /** Never moves the cursor back; a snapshot row is replaced only by a newer seq. */
+  private async applyIncrementalPull(res: PullResponse, deviceId: string): Promise<void> {
+    await this.db.transaction('rw', [this.db.snapshot, this.db.conflicts, this.db.meta], async () => {
+      for (const record of res.records) {
+        const cur = await this.db.snapshot.get(record.id);
+        if (!cur || record.seq > cur.seq) await this.db.snapshot.put(record);
+      }
+      for (const conflict of res.conflicts) {
+        const cur = await this.db.conflicts.get(conflict.id);
+        const newer = !cur || cur.seq === undefined || conflict.seq === undefined || conflict.seq > cur.seq;
+        if (newer) await this.db.conflicts.put(conflict);
+      }
+      const cursor = Number((await this.db.getMeta('cursor')) ?? 0);
+      await this.db.setMeta('cursor', String(Math.max(cursor, res.seq)));
+      await this.finishPull(res, deviceId);
+    });
+  }
+
+  private async finishPull(res: PullResponse, deviceId: string): Promise<void> {
+    if (res.epoch) await this.db.setMeta('epoch', res.epoch);
+    const remote = maxVersion(res.records);
+    if (remote) {
+      const next = hlc.receive(await this.db.getMeta('hlc'), remote, deviceId, Date.now());
+      await this.db.setMeta('hlc', next);
+    }
+    await this.db.setMeta('lastSyncedAt', new Date().toISOString());
+  }
+
+  async dismissServerResetNotice(): Promise<void> {
+    await this.db.meta.delete(SERVER_RESET_NOTICE_KEY);
   }
 
   /**

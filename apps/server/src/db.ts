@@ -1,4 +1,9 @@
 import Database from 'better-sqlite3';
+import { randomUUID } from 'node:crypto';
+
+export function newEpoch(): string {
+  return randomUUID();
+}
 
 export type DatabaseInstance = Database.Database;
 
@@ -63,6 +68,7 @@ export function createDatabase(dbPath = ':memory:'): DatabaseInstance {
   if (!seqRow) {
     db.prepare('INSERT INTO meta (key, value) VALUES (?, ?)').run('seq', '0');
   }
+  db.prepare('INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)').run('epoch', newEpoch());
 
   return db;
 }

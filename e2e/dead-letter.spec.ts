@@ -30,14 +30,14 @@ test.describe('fix-R1: dead-letter, nothing lost silently', () => {
       await expect(page.getByTestId('outbox-counter')).not.toBeVisible({ timeout: 10000 });
       await expect(page.getByTestId('dead-letter-banner')).not.toBeVisible();
 
-      // 2. The server is reset: the record no longer exists server-side.
-      const reset = await request.post('http://localhost:3001/api/dev/reset');
-      expect(reset.ok()).toBe(true);
-
-      // 3. A goes offline and edits the record.
+      // 2. A goes offline, then the server is reset: the record no longer exists server-side.
       await context.setOffline(true);
       await page.evaluate(() => window.dispatchEvent(new Event('offline')));
       await expect(page.getByTestId('connection-pill')).toContainText('Offline', { timeout: 8000 });
+      const reset = await request.post('http://localhost:3001/api/dev/reset');
+      expect(reset.ok()).toBe(true);
+
+      // 3. Still offline, A edits the record it last saw.
       await page.locator('.household-card').filter({ hasText: familyName }).click();
       await page.getByTestId('detail-phone-input').fill(newPhone);
       await page.getByTestId('detail-phone-input').press('Enter');

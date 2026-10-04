@@ -239,6 +239,22 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   font-weight: 500;
 }
 
+.server-reset-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--warning-bg);
+  color: var(--warning);
+  border-bottom: 1px solid var(--warning-border);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.server-reset-notice span {
+  flex: 1;
+}
+
 .dead-letter-banner {
   display: flex;
   align-items: center;

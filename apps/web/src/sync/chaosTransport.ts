@@ -104,9 +104,9 @@ export class ChaosTransport implements SyncTransport {
     return this.inner.push(deviceId, userId, ops);
   }
 
-  async pull(since: number): Promise<PullResponse> {
+  async pull(since: number, epoch?: string): Promise<PullResponse> {
     await this.applyProfile();
-    return this.inner.pull(since);
+    return this.inner.pull(since, epoch);
   }
 
   async preview?(ops: Op[]): Promise<{ results: ApplyResult[] }> {

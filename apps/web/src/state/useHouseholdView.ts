@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db, OutboxOp, ClientConflict } from '../db';
 import { RecordState, applyOptimistic, FieldValue } from '@synctrail/shared';
-import { syncEngine, SyncState } from '../sync/engine';
+import { syncEngine, SyncState, SERVER_RESET_NOTICE_KEY } from '../sync/engine';
 import { connectivity } from '../sync/connectivity';
 
 export interface DerivedRecord {
@@ -44,7 +44,8 @@ export function useHouseholdView() {
 
   const metaData = useLiveQuery(async () => {
     const lastSynced = await db.getMeta('lastSyncedAt');
-    return { lastSynced };
+    const resetNotice = await db.getMeta(SERVER_RESET_NOTICE_KEY);
+    return { lastSynced, serverResetUnsynced: resetNotice === null ? null : Number(resetNotice) };
   }, []);
 
   const data = useLiveQuery(async () => {
@@ -200,6 +201,10 @@ export function useHouseholdView() {
     await syncEngine.discardDeadOp(opId);
   };
 
+  const dismissServerReset = async () => {
+    await syncEngine.dismissServerResetNotice();
+  };
+
   return {
     records: data?.records ?? [],
     outboxOps: data?.outboxOps ?? [],
@@ -215,6 +220,8 @@ export function useHouseholdView() {
     syncState,
     retryCountdown,
     lastSyncedAt: metaData?.lastSynced ?? null,
+    serverResetUnsynced: metaData?.serverResetUnsynced ?? null,
+    dismissServerReset,
     switchUser,
     triggerSync,
     resolveConflict,

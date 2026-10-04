@@ -6,6 +6,8 @@ import { WebSocket } from 'ws';
 import { classifyOps } from './opValidation';
 import type { ApplyResult, Op } from '@synctrail/shared';
 
+const EPOCH_RE = /^[A-Za-z0-9-]{1,64}$/;
+
 const FieldValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 
 const PushEnvelopeSchema = z.object({
@@ -49,7 +51,7 @@ export function registerRoutes(
     url: '/api/health',
     handler: async (_request, reply) => {
       reply.header('Cache-Control', 'no-store, no-cache, must-revalidate');
-      return reply.code(200).send({ ok: true, seq: repo.getSeq() });
+      return reply.code(200).send({ ok: true, seq: repo.getSeq(), epoch: repo.getEpoch() });
     },
   });
 
@@ -92,15 +94,18 @@ export function registerRoutes(
     return reply.code(200).send({ results });
   });
 
-  // 4. Pull endpoint (GET /api/sync/pull?since=<seq>)
+  // 4. Pull endpoint (GET /api/sync/pull?since=<seq>&epoch=<id>)
   app.get('/api/sync/pull', async (request, reply) => {
-    const query = request.query as { since?: string };
+    const query = request.query as { since?: string; epoch?: string };
     const sinceSeq = query.since ? Number(query.since) : 0;
     if (isNaN(sinceSeq) || sinceSeq < 0) {
       return reply.code(400).send({ error: 'Invalid since parameter' });
     }
+    if (query.epoch !== undefined && !EPOCH_RE.test(query.epoch)) {
+      return reply.code(400).send({ error: 'Invalid epoch parameter' });
+    }
 
-    const pullData = repo.pull(sinceSeq);
+    const pullData = repo.pullForClient(sinceSeq, query.epoch);
     return reply.code(200).send(pullData);
   });
 
@@ -159,7 +164,7 @@ export function registerRoutes(
     const seq = repo.getSeq();
     broadcaster.broadcast({ type: 'changed', seq });
 
-    return reply.code(200).send({ ok: true, seeded: 12, seq });
+    return reply.code(200).send({ ok: true, seeded: 12, seq, epoch: repo.getEpoch() });
   });
 
   // 9. WebSocket endpoint (/ws)
