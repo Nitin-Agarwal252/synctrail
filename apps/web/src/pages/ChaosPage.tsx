@@ -4,11 +4,12 @@ import { db } from '../db';
 import { chaosTransport } from '../sync/engine';
 import { type NetworkProfile } from '../sync/chaosTransport';
 import {
-  createServerState,
-  applyOp,
-  type Op,
-  type ServerState,
+  runSimulation,
+  compareWithLastWriteWins,
+  type LwwComparison,
+  type SimulationResult,
 } from '@synctrail/shared';
+import { checklistRows, checklistSummary } from './simChecklist';
 import { Wifi, WifiOff, Zap, Clock3, GitBranch, Play, CheckCircle2, XCircle } from 'lucide-react';
 
 const PROFILES: { id: NetworkProfile; label: string; description: string }[] = [
@@ -29,108 +30,18 @@ function profileIcon(id: NetworkProfile) {
   }
 }
 
-// ─── In-browser convergence check ──────────────────────────────────────────
-// Runs a lightweight seeded simulation using the shared pure functions.
-// Seeds are deterministic so results are reproducible.
-function runConvergenceCheck(
-  numSeeds: number,
-  onProgress: (done: number) => void
-): { pass: boolean; failSeed: number | null; elapsed: number } {
-  const t0 = Date.now();
-  const DEVICES = ['A', 'B', 'C'];
-  const FIELDS = ['name', 'phone', 'status', 'notes'];
+const SIM = { seeds: 200, steps: 300, devices: 3 };
 
-  // Simple seeded PRNG (LCG — same algorithm as the shared sim)
-  function makePrng(seed: number) {
-    let s = seed | 0;
-    return () => {
-      s = Math.imul(1664525, s) + 1013904223;
-      return ((s >>> 0) / 4294967296);
-    };
-  }
-
-  for (let seed = 1; seed <= numSeeds; seed++) {
-    const rng = makePrng(seed);
-    const state: ServerState = createServerState();
-
-    const recordId = 'rec_test';
-    const ops: Op[] = [];
-
-    // Create op
-    const createOp: Op = {
-      opId: `op_create_${seed}`,
-      deviceId: 'A',
-      userId: 'Meera',
-      recordId,
-      type: 'create',
-      fields: { name: 'Test', phone: '000', status: 'new', notes: '' },
-      baseHlc: null,
-      hlc: `2020-01-01T00:00:00.000Z-0000-A`,
-    };
-    ops.push(createOp);
-
-    // Generate 20 random set ops from 3 devices
-    for (let i = 0; i < 20; i++) {
-      const device = DEVICES[Math.floor(rng() * DEVICES.length)];
-      const field = FIELDS[Math.floor(rng() * FIELDS.length)];
-      const value = `val_${seed}_${i}`;
-      const wallTs = 1577836800000 + Math.floor(rng() * 3600000);
-      const counterStr = String(i).padStart(4, '0');
-      const hlc = `${new Date(wallTs).toISOString().slice(0, 23)}Z-${counterStr}-${device}`;
-
-      // baseHlc = current field hlc in state (or null)
-      const currentRecord = state.records[recordId];
-      const baseHlc = currentRecord?.fields[field]?.hlc ?? null;
-
-      ops.push({
-        opId: `op_${seed}_${i}`,
-        deviceId: device,
-        userId: 'User',
-        recordId,
-        type: 'set',
-        field,
-        value,
-        baseHlc,
-        hlc,
-      });
-
-      // Apply immediately so next op sees the current state
-      applyOp(state, ops[ops.length - 1]);
-    }
-
-    // Replay all ops from scratch — should converge to same state
-    const state2: ServerState = createServerState();
-    for (const op of ops) {
-      applyOp(state2, op);
-    }
-
-    // Invariant: replaying the whole log on a fresh state yields the same record fields
-    const r1 = state.records[recordId];
-    const r2 = state2.records[recordId];
-    if (r1 && r2) {
-      for (const field of FIELDS) {
-        if (r1.fields[field]?.value !== r2.fields[field]?.value) {
-          return { pass: false, failSeed: seed, elapsed: Date.now() - t0 };
-        }
-      }
-    }
-
-    if (seed % 20 === 0) onProgress(seed);
-  }
-
-  return { pass: true, failSeed: null, elapsed: Date.now() - t0 };
+/** Lets React paint the "running" state before the synchronous simulation blocks the tab. */
+function afterPaint(fn: () => void): void {
+  setTimeout(fn, 10);
 }
 
 export function ChaosPage() {
   const [activeProfile, setActiveProfile] = useState<NetworkProfile>(chaosTransport.getProfile());
-  const [convergenceResult, setConvergenceResult] = useState<{
-    pass: boolean;
-    failSeed: number | null;
-    elapsed: number;
-    seeds: number;
-  } | null>(null);
-  const [convergenceRunning, setConvergenceRunning] = useState(false);
-  const [convergenceProgress, setConvergenceProgress] = useState(0);
+  const [simResult, setSimResult] = useState<SimulationResult | null>(null);
+  const [lwwResult, setLwwResult] = useState<LwwComparison | null>(null);
+  const [running, setRunning] = useState<'sim' | 'lww' | null>(null);
 
   useEffect(() => {
     return chaosTransport.onProfileChange((p: NetworkProfile) => setActiveProfile(p));
@@ -141,16 +52,21 @@ export function ChaosPage() {
   };
 
   const handleRunConvergence = () => {
-    setConvergenceRunning(true);
-    setConvergenceProgress(0);
-    setConvergenceResult(null);
+    setRunning('sim');
+    setSimResult(null);
+    afterPaint(() => {
+      setSimResult(runSimulation(SIM));
+      setRunning(null);
+    });
+  };
 
-    // Use setTimeout to let React render the loading state before the CPU-heavy loop
-    setTimeout(() => {
-      const result = runConvergenceCheck(200, (done) => setConvergenceProgress(done));
-      setConvergenceResult({ ...result, seeds: 200 });
-      setConvergenceRunning(false);
-    }, 10);
+  const handleCompareLww = () => {
+    setRunning('lww');
+    setLwwResult(null);
+    afterPaint(() => {
+      setLwwResult(compareWithLastWriteWins(SIM));
+      setRunning(null);
+    });
   };
 
   // Live op timeline from Dexie
@@ -213,40 +129,31 @@ export function ChaosPage() {
       <div className="chaos-section">
         <h3 className="chaos-section-title">Convergence check</h3>
         <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginBottom: '12px' }}>
-          Runs 200 seeded sessions of the shared simulation engine in this browser tab. Verifies
-          all 6 invariants (no silent overwrite, all ops reach terminal state, conflicts are
-          recoverable, replay is idempotent).
+          Runs {SIM.seeds} seeded sessions ({SIM.steps} steps, {SIM.devices} devices each) of{' '}
+          <code>runSimulation</code> from <code>packages/shared/src/sim.ts</code> in this tab, against the
+          real shared merge, and checks 7 invariants. The time shown is measured.
         </p>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
           <button
             className="btn btn-primary"
             onClick={handleRunConvergence}
-            disabled={convergenceRunning}
+            disabled={running !== null}
             data-testid="run-convergence-btn"
           >
             <Play size={14} aria-hidden="true" />
-            <span>{convergenceRunning ? `Running… (${convergenceProgress}/200)` : 'Run convergence check'}</span>
+            <span>{running === 'sim' ? 'Running…' : 'Run convergence check'}</span>
           </button>
-
-          {convergenceResult && (
-            <div
-              className={`convergence-result ${convergenceResult.pass ? 'convergence-pass' : 'convergence-fail'}`}
-              data-testid="convergence-result"
-              aria-live="polite"
-            >
-              {convergenceResult.pass ? (
-                <CheckCircle2 size={16} aria-hidden="true" />
-              ) : (
-                <XCircle size={16} aria-hidden="true" />
-              )}
-              <span>
-                {convergenceResult.pass
-                  ? `All ${convergenceResult.seeds} seeds pass · ${convergenceResult.elapsed}ms`
-                  : `Failed at seed ${convergenceResult.failSeed} · ${convergenceResult.elapsed}ms`}
-              </span>
-            </div>
-          )}
+          <button
+            className="btn btn-secondary"
+            onClick={handleCompareLww}
+            disabled={running !== null}
+            data-testid="compare-lww-btn"
+          >
+            <span>{running === 'lww' ? 'Comparing…' : 'Compare with last-write-wins'}</span>
+          </button>
         </div>
+        {simResult && <SimChecklist result={simResult} />}
+        {lwwResult && <LwwPanel result={lwwResult} />}
       </div>
 
       {/* Live Op Timeline */}
@@ -291,6 +198,64 @@ export function ChaosPage() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function SimChecklist({ result }: { result: SimulationResult }) {
+  const summary = checklistSummary(result);
+  return (
+    <div className="sim-checklist" data-testid="sim-checklist">
+      <div
+        className={`convergence-result ${summary.tone === 'pass' ? 'convergence-pass' : 'convergence-fail'}`}
+        data-testid="convergence-result"
+        aria-live="polite"
+      >
+        {summary.tone === 'pass' ? <CheckCircle2 size={16} aria-hidden="true" /> : <XCircle size={16} aria-hidden="true" />}
+        <span>{summary.text}</span>
+      </div>
+      <ul className="invariant-list">
+        {checklistRows(result).map((row) => (
+          <li
+            key={row.name}
+            className={`invariant-row ${row.pass ? 'invariant-pass' : 'invariant-fail'}`}
+            data-testid="invariant-row"
+            data-pass={String(row.pass)}
+          >
+            {row.pass ? <CheckCircle2 size={14} aria-hidden="true" /> : <XCircle size={14} aria-hidden="true" />}
+            <span className="invariant-label">{row.label}</span>
+            <span className="invariant-name">{row.name}</span>
+            <span className="invariant-detail">{row.detail}</span>
+          </li>
+        ))}
+      </ul>
+      <p className="sim-counts" data-testid="sim-counts">
+        {result.counts.ops} ops · {result.counts.conflictsOpened} conflicts opened ·{' '}
+        {result.counts.duplicatesReplayed} duplicates replayed
+      </p>
+    </div>
+  );
+}
+
+function LwwPanel({ result }: { result: LwwComparison }) {
+  return (
+    <div className="lww-compare" data-testid="lww-compare">
+      <h4 className="lww-title">Comparison harness: naive last-write-wins (never used by SyncTrail)</h4>
+      <p className="lww-note">
+        The same {result.sessions} seeded sessions, applied by SyncTrail&apos;s merge and by a naive
+        newest-timestamp-wins function. A lost edit is a change that was overwritten, dropped or deleted
+        without its author or the other author ever seeing it. Measured {Math.round(result.elapsedMs)} ms.
+      </p>
+      <ul className="lww-list">
+        <li data-testid="lww-synctrail">
+          SyncTrail: <strong data-testid="lww-synctrail-lost">{result.syncTrail.lostEdits}</strong> lost edits of{' '}
+          {result.syncTrail.ops} ops
+        </li>
+        <li data-testid="lww-naive">
+          Last-write-wins: <strong data-testid="lww-naive-lost">{result.lastWriteWins.lostEdits}</strong> lost edits of{' '}
+          {result.lastWriteWins.ops} ops
+        </li>
+      </ul>
     </div>
   );
 }

@@ -95,7 +95,7 @@ node apps/server/dist/index.js   # serves API on :3001
 6. Reconnect Dev: preview → "phone merges cleanly; status conflicts; #57 delete conflicts".
 7. Dev resolves in the **Conflict inbox** (ancestor, mine, theirs, authors, times). Meera's screen updates live.
 8. Open **Dashboard** → audit trail shows the full lifecycle.
-9. Chaos page → **Run convergence check**: 200 seeds, green, < 100ms.
+9. Chaos page → **Run convergence check**: `runSimulation` (packages/shared/src/sim.ts) runs 200 seeded sessions against the real merge and shows a 7-invariant checklist with counts and the measured time. **Compare with last-write-wins** runs the same seeds through a naive LWW comparison harness and shows lost edits (SyncTrail: 0).
 
 ---
 
