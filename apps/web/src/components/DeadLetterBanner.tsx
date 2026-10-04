@@ -2,6 +2,13 @@ import { useState } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import type { DeadOp } from '../db';
 
+function describeOp(d: DeadOp): string {
+  const { op } = d;
+  if (op.type === 'set') return `set ${op.field ?? '?'} = ${JSON.stringify(op.value ?? null)}`;
+  if (op.type === 'create') return `create "${String(op.fields?.name ?? '')}"`;
+  return op.type;
+}
+
 interface DeadLetterBannerProps {
   deadOps: DeadOp[];
   onRetry: (opId: string) => void;
@@ -15,6 +22,7 @@ export const DeadLetterBanner: React.FC<DeadLetterBannerProps> = ({
 }) => {
   const [open, setOpen] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [confirmId, setConfirmId] = useState<string | null>(null);
 
   if (deadOps.length === 0) {
     return null;
@@ -57,8 +65,8 @@ export const DeadLetterBanner: React.FC<DeadLetterBannerProps> = ({
               data-testid={`dead-letter-item-${d.opId}`}
             >
               <div className="dead-letter-item-meta">
-                <strong>{d.op.type}</strong>
-                <span> record {d.recordId}</span>
+                <strong data-testid={`dead-letter-op-${d.opId}`}>{describeOp(d)}</strong>
+                <span> · record {d.recordId}</span>
                 <span className="dead-letter-reason" data-testid={`dead-letter-reason-${d.opId}`}>
                   {d.reason}
                 </span>
@@ -80,14 +88,28 @@ export const DeadLetterBanner: React.FC<DeadLetterBannerProps> = ({
                 >
                   Retry
                 </button>
-                <button
-                  type="button"
-                  className="btn btn-danger"
-                  data-testid={`dead-letter-discard-${d.opId}`}
-                  onClick={() => onDiscard(d.opId)}
-                >
-                  Discard
-                </button>
+                {confirmId === d.opId ? (
+                  <button
+                    type="button"
+                    className="btn btn-danger"
+                    data-testid={`dead-letter-confirm-discard-${d.opId}`}
+                    onClick={() => {
+                      setConfirmId(null);
+                      onDiscard(d.opId);
+                    }}
+                  >
+                    Discard permanently
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-danger"
+                    data-testid={`dead-letter-discard-${d.opId}`}
+                    onClick={() => setConfirmId(d.opId)}
+                  >
+                    Discard
+                  </button>
+                )}
               </div>
             </li>
           ))}

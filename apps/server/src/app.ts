@@ -26,6 +26,9 @@ export interface AppContext {
 export async function buildApp(opts: AppOptions = {}): Promise<FastifyInstance> {
   const app = Fastify({
     logger: opts.logger ?? false,
+    // A `__proto__` key must reject only the op that carries it, not the whole
+    // batch. opValidation.ts rejects it per op; JSON.parse never pollutes prototypes.
+    onProtoPoisoning: 'ignore',
   });
 
   await app.register(cors, {

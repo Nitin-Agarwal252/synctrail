@@ -13,6 +13,7 @@ Update after every phase. Keep entries short and factual.
 | 5 Conflicts and Sync preview | done | `npm run verify` passed (51 tests: 24 shared, 10 server, 17 web, 200 sim, 2000 fast-check, build); Playwright E2E passed (9/9: Scenarios 2, 3, 4 + all prior tests); conflict inbox 3-way card (ancestor/mine/theirs); edit-vs-delete Restore flow; Sync preview dry-run modal; no edit ever lost — server `ops` table audited via Playwright assertions | 7058951 |
 | 6 Chaos Mode, timeline, dashboard | done | `npm run verify` passed (51 unit tests, 200 sim, 2000 fast-check, build); Playwright 13/13 passed; Scenario 7 Flaky passes; convergence check 200 seeds in 72ms (gate: <10s); audit trail shows full conflict lifecycle; Dashboard metric cards + audit trail; Chaos Mode profile selector | 17f4276 |
 | 7 Hardening, docs, deployment | done | `npm run verify` exit 0 (51 unit, 200 sim, 2000 fc, build); Playwright 13/13 exit 0; accessibility: skip link, `lang=en`, `aria-live`, `prefers-reduced-motion`, `focus-visible` rings; README final with Mermaid diagram + all 5 success criteria; edge-case table all 18 rows linked to passing tests; static-serve mode via `SERVE_STATIC=1`; server health `/api/health` 200 verified from built `dist/`; `--primary` CSS var fixed | 5e663a6 |
+| fix-R1 Data safety | done | `npm run verify` exit 0 (typecheck, lint, 24 shared + 21 server + 28 web tests, sim, build); Playwright 14/14 exit 0 incl. new `e2e/dead-letter.spec.ts` (reset → offline edit → reconnect → op in dead-letter list, screenshot `docs/evidence/fix-R1/dead-letter-after-reset.png`); mutation restoring whole-batch delete fails the suite (`docs/evidence/fix-R1/mutation.md`); shared originals SHA256 identical | see `git log` |
 
 ## Already done before phase 0 (provided)
 - `packages/shared/src/{types,hlc,merge}.ts`
@@ -61,6 +62,12 @@ Update after every phase. Keep entries short and factual.
   - `AppHeader.tsx`: Dashboard and Chaos nav tabs added; gated behind `onNavigate` prop (present in App, absent in tests).
   - `index.css`: Dashboard and Chaos page CSS (~220 lines) — metric cards, audit trail rows, profile selector buttons, timeline rows, convergence result badge.
   - Playwright E2E `e2e/chaos.spec.ts`: Scenario 7 (Flaky 30% profile, 20 edits, convergence verified via `/api/stats`); Dashboard metric cards; convergence check 200 seeds (72ms); audit conflict lifecycle.
+- fix-R1 data safety:
+  - `SyncEngine.pushAll()` inspects every result: `applied|noop|duplicate` and `conflict` leave the outbox; `rejected:unknown-record` stays queued with `pushAttempts` and dead-letters on attempt 5, or at once when the record is in the local synced snapshot with no queued create (the server previously had it, so absence is confirmed); any other rejection dead-letters immediately.
+  - Whole-batch 4xx: ops are resent one by one; offending ops dead-letter with the server's reason, the rest go through. `408`/`429` are treated as transient (backoff), not dead-lettered.
+  - Dexie v2 adds `deadOps`; v1 outbox rows preserved (`db/migration.test.ts`). Banner "N changes couldn't be saved" with Copy JSON, Retry, two-click Discard. Engine exposes `getPushOutcomes()` (accepted / conflicted / dead-lettered); randomized test asserts submitted = accepted + conflicted + still-queued + dead-lettered.
+  - Server validates each op (`opValidation.ts`) and returns `rejected` / `invalid-op: <detail>` without aborting the batch; 400 only for malformed envelopes or more than 50 ops (push and preview). Fastify `onProtoPoisoning: 'ignore'` so a `__proto__` key is rejected per op instead of failing the whole request.
+  - Known gap left for R2: after a server reset the client keeps the stale record in its snapshot and its cursor is not reset.
 
 ## Open questions for the user
 (none)

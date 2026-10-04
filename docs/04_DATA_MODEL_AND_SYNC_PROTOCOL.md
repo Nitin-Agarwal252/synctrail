@@ -104,7 +104,7 @@ Per-op validation (push and preview):
 - field names from the allowlist `name | phone | address | status | notes`
 - `status` values `new | follow-up | completed`
 - `set` requires `value`
-- reject the key `__proto__` on the op, `fields`, or `seen`
+- reject the key `__proto__` on the op, `fields`, or `seen` (`invalid-op: __proto__`, per op; Fastify `onProtoPoisoning` is set to `ignore` so the JSON parser does not 400 the whole batch first)
 - max **50** ops for both push and preview (envelope 400 if exceeded)
 
 ### Client outbox after push
@@ -117,9 +117,9 @@ The client inspects **every** `results[i]` and never deletes a whole batch becau
 | `rejected` with `unknown-record` | **keep**; increment attempts. After **5** attempts, or after a pull confirms the record is absent (or a local snapshot is stale vs the server), move to `deadOps` |
 | any other `rejected` reason (including `invalid-op: …`) | move to `deadOps` immediately |
 
-Whole-batch **4xx**: do not retry the batch forever. Resend ops **one by one**. Offending ops go to `deadOps` with the server's reason; the rest go through.
+Whole-batch **4xx**: do not retry the batch forever. Resend ops **one by one**. Offending ops go to `deadOps` with the server's reason; the rest go through. Exceptions: `408` and `429` describe timing, not content, so they are retried with backoff like network errors and `5xx`.
 
-Discard from the dead-letter is a **user action only**. Nothing is deleted silently.
+Discard from the dead-letter is a **user action only** (two clicks: Discard, then Discard permanently). Retry moves the op back to the end of the outbox with attempts reset. Nothing is deleted silently.
 
 Invariant: `submitted = accepted + conflicted + still-queued + dead-lettered`.
 

@@ -40,18 +40,18 @@ function clientPushErrorReason(err: unknown): string {
 
 export const UNKNOWN_RECORD_MAX_ATTEMPTS = 5;
 
-export type PushAccounting = {
+/** 4xx statuses that describe the request timing, not its content. Retried with backoff. */
+const TRANSIENT_CLIENT_STATUSES = new Set([408, 429]);
+
+function isPoisonCandidate(err: unknown): err is SyncPushError {
+  return isClientPushError(err) && !TRANSIENT_CLIENT_STATUSES.has(err.status);
+}
+
+/** Counts of ops that left the outbox, by outcome, since this engine was created. */
+export interface PushOutcomeCounts {
   accepted: number;
   conflicted: number;
-  queued: number;
   deadLettered: number;
-};
-
-export function accountingHolds(
-  submitted: number,
-  acc: PushAccounting
-): boolean {
-  return submitted === acc.accepted + acc.conflicted + acc.queued + acc.deadLettered;
 }
 
 export interface SyncTransport {
@@ -231,6 +231,7 @@ export class SyncEngine {
 
   private isRunningLoop = false;
   private isSyncing = false;
+  private outcomes: PushOutcomeCounts = { accepted: 0, conflicted: 0, deadLettered: 0 };
   private wsUnsubscribe: (() => void) | null = null;
   private connectivityUnsubscribe: (() => void) | null = null;
 
@@ -242,6 +243,10 @@ export class SyncEngine {
     this.batchSize = options.batchSize ?? 50;
 
     this.state = this.connectivity.isOnline() ? 'synced' : 'offline';
+  }
+
+  getPushOutcomes(): PushOutcomeCounts {
+    return { ...this.outcomes };
   }
 
   getState(): { state: SyncState; retryCountdown: number } {
@@ -413,31 +418,39 @@ export class SyncEngine {
         const res = await this.transport.push(deviceId, userId, ops);
         removed += await this.applyPushResults(batch, res.results);
       } catch (err) {
-        if (isClientPushError(err) && batch.length > 1) {
-          for (const item of batch) {
-            try {
-              const oneRes = await this.transport.push(deviceId, userId, [this.db.toWireOp(item)]);
-              removed += await this.applyPushResults([item], oneRes.results);
-            } catch (oneErr) {
-              if (isClientPushError(oneErr)) {
-                await this.moveToDeadLetter(item, clientPushErrorReason(oneErr));
-                removed += 1;
-              } else {
-                throw oneErr;
-              }
-            }
-          }
-          continue;
-        }
-        if (isClientPushError(err) && batch.length === 1) {
-          await this.moveToDeadLetter(batch[0], clientPushErrorReason(err));
-          removed += 1;
-          continue;
-        }
-        throw err;
+        if (!isPoisonCandidate(err)) throw err;
+        removed += await this.isolatePoisonOps(batch, deviceId, userId, err);
       }
     }
 
+    return removed;
+  }
+
+  /**
+   * A whole-batch 4xx: resend ops one by one so only the offending ops are
+   * dead-lettered (with the server's reason) and the rest go through.
+   */
+  private async isolatePoisonOps(
+    batch: OutboxOp[],
+    deviceId: string,
+    userId: string,
+    batchErr: SyncPushError
+  ): Promise<number> {
+    if (batch.length === 1) {
+      await this.moveToDeadLetter(batch[0], clientPushErrorReason(batchErr));
+      return 1;
+    }
+    let removed = 0;
+    for (const item of batch) {
+      try {
+        const oneRes = await this.transport.push(deviceId, userId, [this.db.toWireOp(item)]);
+        removed += await this.applyPushResults([item], oneRes.results);
+      } catch (oneErr) {
+        if (!isPoisonCandidate(oneErr)) throw oneErr;
+        await this.moveToDeadLetter(item, clientPushErrorReason(oneErr));
+        removed += 1;
+      }
+    }
     return removed;
   }
 
@@ -455,11 +468,13 @@ export class SyncEngine {
       const status = result.status;
       if (status === 'applied' || status === 'noop' || status === 'duplicate') {
         await this.db.outbox.where('opId').equals(item.opId).delete();
+        this.outcomes.accepted += 1;
         removed += 1;
         continue;
       }
       if (status === 'conflict') {
         await this.db.outbox.where('opId').equals(item.opId).delete();
+        this.outcomes.conflicted += 1;
         removed += 1;
         continue;
       }
@@ -526,6 +541,7 @@ export class SyncEngine {
       });
       await this.db.outbox.where('opId').equals(item.opId).delete();
     });
+    this.outcomes.deadLettered += 1;
   }
 
   async retryDeadOp(opId: string): Promise<void> {
@@ -544,19 +560,6 @@ export class SyncEngine {
 
   async discardDeadOp(opId: string): Promise<void> {
     await this.db.deadOps.where('opId').equals(opId).delete();
-  }
-
-  async collectAccounting(submitted: number): Promise<PushAccounting & { submitted: number; holds: boolean }> {
-    const queued = await this.db.outbox.count();
-    const deadLettered = await this.db.deadOps.count();
-    const acceptedAndConflicted = Math.max(0, submitted - queued - deadLettered);
-    const acc: PushAccounting = {
-      accepted: acceptedAndConflicted,
-      conflicted: 0,
-      queued,
-      deadLettered,
-    };
-    return { submitted, ...acc, holds: submitted === queued + deadLettered + acceptedAndConflicted };
   }
 
   /**
