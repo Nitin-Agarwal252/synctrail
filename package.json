@@ -1,0 +1,32 @@
+{
+  "name": "synctrail",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "test": "npm run test --workspaces --if-present",
+    "test:sim": "npm run test -w @synctrail/shared -- convergence",
+    "test:e2e": "playwright test",
+    "build": "npm run build --workspaces --if-present",
+    "verify": "npm run typecheck && npm run lint && npm run test && npm run test:sim && npm run build",
+    "start:prod": "npm run build && SERVE_STATIC=1 node apps/server/dist/index.js",
+    "dev": "concurrently -k -p \"[{name}]\" -n \"server,web\" -c \"blue.bold,green.bold\" \"npm run dev -w @synctrail/server\" \"npm run dev -w @synctrail/web\""
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.11.1",
+    "@playwright/test": "^1.63.0",
+    "concurrently": "^9.0.1",
+    "eslint": "^9.11.1",
+    "prettier": "^3.3.3",
+    "typescript": "^5.6.2",
+    "typescript-eslint": "^8.7.0"
+  }
+}

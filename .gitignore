@@ -1,0 +1,11 @@
+node_modules
+dist
+coverage
+.DS_Store
+*.log
+.mutation-tmp
+playwright-report
+test-results
+*.db
+*.db-shm
+*.db-wal
